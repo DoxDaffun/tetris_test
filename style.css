@@ -154,7 +154,6 @@ button.active { border-color: var(--accent); color: var(--accent); }
 }
 .cell:hover { opacity: 0.85; }
 .cell.prefilled { outline: 2px solid #ffffff44; }
-.cell.line { box-shadow: inset 0 -3px 0 #ffffffaa; }
 
 /* 上位品質 (紫+1 / 金+1) のスパークル: 斜めのキラキラ光沢を重ねる。
    インライン background-color と衝突しないよう疑似要素で描画。 */
