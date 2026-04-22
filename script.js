@@ -333,16 +333,16 @@ function renderOneBoard(key) {
           const adj = (nr, nc) =>
             (nr >= 0 && nr < meta.rows && nc >= 0 && nc < meta.cols && bs.pieceIds)
               ? (bs.pieceIds[nr][nc] ?? null) : null;
-          if (adj(r-1, c) !== pId) shadows.push('inset 0  3px 0 rgba(255,255,255,0.9)');
-          if (adj(r+1, c) !== pId) shadows.push('inset 0 -3px 0 rgba(255,255,255,0.9)');
-          if (adj(r, c-1) !== pId) shadows.push('inset  3px 0 0 rgba(255,255,255,0.9)');
-          if (adj(r, c+1) !== pId) shadows.push('inset -3px 0 0 rgba(255,255,255,0.9)');
+          if (adj(r-1, c) !== pId) shadows.push('inset 0  2px 0 rgba(255,255,255,0.85)');
+          if (adj(r+1, c) !== pId) shadows.push('inset 0 -2px 0 rgba(255,255,255,0.85)');
+          if (adj(r, c-1) !== pId) shadows.push('inset  2px 0 0 rgba(255,255,255,0.85)');
+          if (adj(r, c+1) !== pId) shadows.push('inset -2px 0 0 rgba(255,255,255,0.85)');
         } else {
           // ペイント塗りセル（pieceId無し）は4辺すべてに輪郭
-          shadows.push('inset 0  3px 0 rgba(255,255,255,0.9)');
-          shadows.push('inset 0 -3px 0 rgba(255,255,255,0.9)');
-          shadows.push('inset  3px 0 0 rgba(255,255,255,0.9)');
-          shadows.push('inset -3px 0 0 rgba(255,255,255,0.9)');
+          shadows.push('inset 0  2px 0 rgba(255,255,255,0.85)');
+          shadows.push('inset 0 -2px 0 rgba(255,255,255,0.85)');
+          shadows.push('inset  2px 0 0 rgba(255,255,255,0.85)');
+          shadows.push('inset -2px 0 0 rgba(255,255,255,0.85)');
         }
       }
       if (shadows.length) div.style.boxShadow = shadows.join(', ');
