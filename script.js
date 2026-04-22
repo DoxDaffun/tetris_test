@@ -57,7 +57,7 @@ const state = {
   paintGrade: 'better',
   manualGrade: 'better',
   manualShape: 'T',
-  boards: {},                    // boardKey -> { cells: [[grade|null]], locked: [[bool]] }
+  boards: {},                    // boardKey -> { cells: [[grade|null]], locked: [[bool]], pieceIds: [[string|null]] }
   inventory: {},                 // gradeKey -> shapeKey -> count
   solveResult: null              // { placements, unused }
 };
@@ -66,9 +66,8 @@ function initState() {
   for (const key of BOARD_ORDER) {
     const { rows, cols } = BOARDS[key];
     state.boards[key] = {
-      cells:    Array.from({ length: rows }, () => Array(cols).fill(null)),
-      locked:   Array.from({ length: rows }, () => Array(cols).fill(false)),
-      shapes:   Array.from({ length: rows }, () => Array(cols).fill(null)),
+      cells: Array.from({ length: rows }, () => Array(cols).fill(null)),
+      locked: Array.from({ length: rows }, () => Array(cols).fill(false)),
       pieceIds: Array.from({ length: rows }, () => Array(cols).fill(null))
     };
   }
@@ -126,13 +125,14 @@ function loadState() {
         if (!saved.cells.every(row => Array.isArray(row) && row.length === meta.cols)) continue;
         state.boards[k].cells  = saved.cells.map(r => r.map(v => (gradeMap[v] ? v : null)));
         state.boards[k].locked = saved.locked.map(r => r.map(v => !!v));
-        if (Array.isArray(saved.shapes) && saved.shapes.length === meta.rows &&
-            saved.shapes.every(row => Array.isArray(row) && row.length === meta.cols)) {
-          state.boards[k].shapes = saved.shapes.map(r => r.map(v => (SHAPES.includes(v) ? v : null)));
-        }
-        if (Array.isArray(saved.pieceIds) && saved.pieceIds.length === meta.rows &&
-            saved.pieceIds.every(row => Array.isArray(row) && row.length === meta.cols)) {
+        if (
+          Array.isArray(saved.pieceIds) &&
+          saved.pieceIds.length === meta.rows &&
+          saved.pieceIds.every(row => Array.isArray(row) && row.length === meta.cols)
+        ) {
           state.boards[k].pieceIds = saved.pieceIds.map(r => r.map(v => (typeof v === 'string' ? v : null)));
+        } else {
+          state.boards[k].pieceIds = Array.from({ length: meta.rows }, () => Array(meta.cols).fill(null));
         }
       }
     }
@@ -309,45 +309,29 @@ function renderOneBoard(key) {
   grid.style.gridTemplateRows = `repeat(${meta.rows}, var(--cell))`;
 
   const lines = fullLinesOf(bs.cells);
-  const lineSet = new Set(lines);
 
   for (let r = 0; r < meta.rows; r++) {
     for (let c = 0; c < meta.cols; c++) {
       const div = document.createElement('div');
       div.className = 'cell';
-      const grade  = bs.cells[r][c];
-      const shape  = bs.shapes   ? bs.shapes[r][c]   : null;
-      const pId    = bs.pieceIds ? bs.pieceIds[r][c] : null;
+      const grade = bs.cells[r][c];
       if (grade) {
         const g = gradeMap[grade];
         div.style.background = g.hex;
         if (g.sparkle) div.classList.add('sparkle');
       }
-      if (bs.locked[r][c]) div.classList.add('prefilled');
-
-      // ピース輪郭インセットシャドウ + ライン完成シャドウを一括設定
-      const shadows = [];
-      if (lineSet.has(r)) shadows.push('inset 0 -3px 0 #ffffffaa');
-      if (grade) {
-        if (pId) {
-          const adj = (nr, nc) =>
-            (nr >= 0 && nr < meta.rows && nc >= 0 && nc < meta.cols && bs.pieceIds)
-              ? (bs.pieceIds[nr][nc] ?? null) : null;
-          if (adj(r-1, c) !== pId) shadows.push('inset 0  2px 0 rgba(255,255,255,0.85)');
-          if (adj(r+1, c) !== pId) shadows.push('inset 0 -2px 0 rgba(255,255,255,0.85)');
-          if (adj(r, c-1) !== pId) shadows.push('inset  2px 0 0 rgba(255,255,255,0.85)');
-          if (adj(r, c+1) !== pId) shadows.push('inset -2px 0 0 rgba(255,255,255,0.85)');
-        } else {
-          // ペイント塗りセル（pieceId無し）は4辺すべてに輪郭
-          shadows.push('inset 0  2px 0 rgba(255,255,255,0.85)');
-          shadows.push('inset 0 -2px 0 rgba(255,255,255,0.85)');
-          shadows.push('inset  2px 0 0 rgba(255,255,255,0.85)');
-          shadows.push('inset -2px 0 0 rgba(255,255,255,0.85)');
-        }
+      const myPieceId = bs.pieceIds[r][c];
+      if (myPieceId) {
+        const edges = [];
+        const neighborDiffers = (rr, cc) =>
+          rr < 0 || rr >= meta.rows || cc < 0 || cc >= meta.cols || bs.pieceIds[rr][cc] !== myPieceId;
+        if (neighborDiffers(r - 1, c)) edges.push('inset 0 2px 0 0 #0008', 'inset 0 3px 0 0 #fff9');
+        if (neighborDiffers(r + 1, c)) edges.push('inset 0 -2px 0 0 #0008', 'inset 0 -3px 0 0 #fff9');
+        if (neighborDiffers(r, c - 1)) edges.push('inset 2px 0 0 0 #0008', 'inset 3px 0 0 0 #fff9');
+        if (neighborDiffers(r, c + 1)) edges.push('inset -2px 0 0 0 #0008', 'inset -3px 0 0 0 #fff9');
+        if (edges.length) div.style.boxShadow = edges.join(', ');
       }
-      if (shadows.length) div.style.boxShadow = shadows.join(', ');
-      else if (lineSet.has(r)) div.classList.add('line');
-
+      if (bs.locked[r][c]) div.classList.add('prefilled');
       div.addEventListener('click', () => onCellClick(key, r, c));
       grid.append(div);
     }
@@ -380,13 +364,11 @@ function onCellClick(boardKey, r, c) {
   if (state.paintMode === 'erase') {
     bs.cells[r][c] = null;
     bs.locked[r][c] = false;
-    if (bs.shapes)   bs.shapes[r][c]   = null;
-    if (bs.pieceIds) bs.pieceIds[r][c] = null;
+    bs.pieceIds[r][c] = null;
   } else {
     bs.cells[r][c] = state.paintGrade;
     bs.locked[r][c] = true;
-    if (bs.shapes)   bs.shapes[r][c]   = null;
-    if (bs.pieceIds) bs.pieceIds[r][c] = null;
+    bs.pieceIds[r][c] = null;
   }
   state.solveResult = null;
   saveState();
@@ -459,15 +441,14 @@ function tryManualPlace(boardKey, r, c) {
   const meta = BOARDS[boardKey];
   const shape = state.manualShape;
   const grade = state.manualGrade;
+  const pieceId = `manual_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   // 全向きを試し、最初にフィットするものを採用
   for (const orient of SHAPE_ORIENTATIONS[shape]) {
     if (fitsAt(bs.cells, orient, r, c, meta)) {
-      const pieceId = `manual_${shape}_${Date.now()}`;
       for (const [dr, dc] of orient) {
         bs.cells[r + dr][c + dc] = grade;
         bs.locked[r + dr][c + dc] = true;
-        if (bs.shapes)   bs.shapes[r + dr][c + dc]   = shape;
-        if (bs.pieceIds) bs.pieceIds[r + dr][c + dc] = pieceId;
+        bs.pieceIds[r + dr][c + dc] = pieceId;
       }
       state.solveResult = null;
       saveState();
@@ -494,9 +475,8 @@ function resetBoards() {
   for (const key of BOARD_ORDER) {
     const { rows, cols } = BOARDS[key];
     state.boards[key] = {
-      cells:    Array.from({ length: rows }, () => Array(cols).fill(null)),
-      locked:   Array.from({ length: rows }, () => Array(cols).fill(false)),
-      shapes:   Array.from({ length: rows }, () => Array(cols).fill(null)),
+      cells: Array.from({ length: rows }, () => Array(cols).fill(null)),
+      locked: Array.from({ length: rows }, () => Array(cols).fill(false)),
       pieceIds: Array.from({ length: rows }, () => Array(cols).fill(null))
     };
   }
@@ -620,13 +600,9 @@ function runSolve() {
   // 盤ごとに固定(locked)と既存配置の状態をコピー
   const boardStates = {};
   for (const k of keys) {
-    const { rows, cols } = BOARDS[k];
-    const emptyGrid = () => Array.from({ length: rows }, () => Array(cols).fill(null));
     boardStates[k] = {
-      cells:    state.boards[k].cells.map(r => r.slice()),
-      locked:   state.boards[k].locked.map(r => r.slice()),
-      shapes:   (state.boards[k].shapes   || emptyGrid()).map(r => r.slice()),
-      pieceIds: (state.boards[k].pieceIds || emptyGrid()).map(r => r.slice()),
+      cells: state.boards[k].cells.map(r => r.slice()),
+      locked: state.boards[k].locked.map(r => r.slice()),
       meta: BOARDS[k]
     };
   }
@@ -635,11 +611,8 @@ function runSolve() {
   for (const k of keys) {
     for (let r = 0; r < boardStates[k].meta.rows; r++) {
       for (let c = 0; c < boardStates[k].meta.cols; c++) {
-        if (!boardStates[k].locked[r][c]) {
-          boardStates[k].cells[r][c]    = null;
-          boardStates[k].shapes[r][c]   = null;
-          boardStates[k].pieceIds[r][c] = null;
-        }
+        if (!boardStates[k].locked[r][c]) boardStates[k].cells[r][c] = null;
+        if (!state.boards[k].locked[r][c]) state.boards[k].pieceIds[r][c] = null;
       }
     }
   }
@@ -654,10 +627,12 @@ function runSolve() {
 
   // 反映
   for (const k of keys) {
-    state.boards[k].cells    = boardStates[k].cells;
-    state.boards[k].shapes   = boardStates[k].shapes;
-    state.boards[k].pieceIds = boardStates[k].pieceIds;
+    state.boards[k].cells = boardStates[k].cells;
     // locked は変更しない (ユーザー指定のみ locked)
+  }
+  for (const p of placements) {
+    const bs = state.boards[p.boardKey];
+    for (const [r, c] of p.cells) bs.pieceIds[r][c] = p.pieceId;
   }
   const unused = pieces.filter(p => !used.has(p.id));
   state.solveResult = { placements, unused };
@@ -709,9 +684,7 @@ function fillBoardGreedy(boardState, pieces, used, placements, boardKey) {
     for (const [dr, dc] of best.orient) {
       const rr = best.baseR + dr;
       const cc = best.baseC + dc;
-      boardState.cells[rr][cc]    = best.piece.grade;
-      boardState.shapes[rr][cc]   = best.piece.shape;
-      boardState.pieceIds[rr][cc] = best.piece.id;
+      boardState.cells[rr][cc] = best.piece.grade;
       cells.push([rr, cc]);
     }
     used.add(best.piece.id);
