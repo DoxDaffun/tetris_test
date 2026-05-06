@@ -173,7 +173,6 @@ function cacheEls() {
   el.manualToggle = document.getElementById('manualToggle');
   el.resetBoard = document.getElementById('resetBoard');
   el.solveBtn = document.getElementById('solveBtn');
-  el.solveBtnPrecise = document.getElementById('solveBtnPrecise');
   el.status = document.getElementById('status');
   el.inventory = document.getElementById('inventory');
   el.unusedPanel = document.getElementById('unusedPanel');
@@ -203,8 +202,7 @@ function init() {
   el.eraseToggle.addEventListener('click', () => setPaintMode('erase'));
   el.manualToggle.addEventListener('click', () => toggleManual());
   el.resetBoard.addEventListener('click', resetBoards);
-  el.solveBtn.addEventListener('click', () => runSolve({ precise: false }));
-  el.solveBtnPrecise.addEventListener('click', () => runSolve({ precise: true }));
+  el.solveBtn.addEventListener('click', runSolve);
 
   renderBoardSelect();
   renderBoards();
@@ -575,8 +573,8 @@ function drawMiniShape(container, shape, grade) {
 }
 
 // === ソルバー ===
-function runSolve(opts = { precise: false }) {
-  const solveOpts = { precise: !!opts.precise, _anyTimedOut: false };
+function runSolve() {
+  const solveOpts = { _anyTimedOut: false };
   const keys = selectedBoardKeys();
   if (keys.length === 0) {
     setStatus('使用する盤を選択してください');
@@ -624,7 +622,7 @@ function runSolve(opts = { precise: false }) {
   // 盤の優先順: selectedBoardKeys() がメインを先頭にする。
   for (const k of keys) {
     const boardOpts = {
-      deadline: solveOpts.precise ? null : performance.now() + 500,
+      deadline: performance.now() + 500,
       timedOut: false
     };
     const result = solveBoard(boardStates[k], invByGrade, boardOpts);
@@ -664,7 +662,7 @@ function runSolve(opts = { precise: false }) {
 
   const msg = `最適化完了: ${placements.length} 配置, 未使用 ${unused.length}`;
   const lineSummary = keys.map(k => `${BOARDS[k].name}=${fullLinesOf(boardStates[k].cells).length}`).join(', ');
-  const timeoutMsg = solveOpts._anyTimedOut ? ' | ⚠ 基本モードで打ち切り。精密モードで再計算可能' : '';
+  const timeoutMsg = solveOpts._anyTimedOut ? ' | ⚠ 時間内の最良解を表示しています' : '';
   setStatus(`${msg} | ラインs ${lineSummary}${timeoutMsg}`);
 }
 
