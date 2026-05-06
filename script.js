@@ -4,7 +4,7 @@ const BOARDS = {
   skateboard: { key: 'skateboard', name: 'スケボー',   alias: 'Hover',   rows: 8, cols: 9,  color: '#a77bff' },
   horse:      { key: 'horse',      name: '馬',         alias: 'Doom',    rows: 8, cols: 12, color: '#ff6666' }
 };
-const BOARD_ORDER = ['segway', 'skateboard', 'horse'];
+const BOARD_ORDER = ['horse', 'skateboard', 'segway'];
 
 // === 品質 (grade) ===
 // 紫 (excellent) は旧キラ紫の色を、金 (epic) は旧キラ橙の色を流用。
@@ -19,6 +19,7 @@ const GRADES = [
   { key: 'legend',        label: '赤 (legend)',      hex: '#ff6666', priority: 7, sparkle: false }
 ];
 const gradeMap = Object.fromEntries(GRADES.map(g => [g.key, g]));
+const GRADES_DESC_PRIORITY = GRADES.slice().sort((a, b) => b.priority - a.priority);
 
 // === 形状 ===
 const SHAPES = ['O', 'I', 'T', 'L', 'J'];
@@ -172,6 +173,7 @@ function cacheEls() {
   el.manualToggle = document.getElementById('manualToggle');
   el.resetBoard = document.getElementById('resetBoard');
   el.solveBtn = document.getElementById('solveBtn');
+  el.solveBtnPrecise = document.getElementById('solveBtnPrecise');
   el.status = document.getElementById('status');
   el.inventory = document.getElementById('inventory');
   el.unusedPanel = document.getElementById('unusedPanel');
@@ -201,7 +203,8 @@ function init() {
   el.eraseToggle.addEventListener('click', () => setPaintMode('erase'));
   el.manualToggle.addEventListener('click', () => toggleManual());
   el.resetBoard.addEventListener('click', resetBoards);
-  el.solveBtn.addEventListener('click', runSolve);
+  el.solveBtn.addEventListener('click', () => runSolve({ precise: false }));
+  el.solveBtnPrecise.addEventListener('click', () => runSolve({ precise: true }));
 
   renderBoardSelect();
   renderBoards();
@@ -349,7 +352,7 @@ function renderOneBoard(key) {
 function fullLinesOf(cells) {
   const lines = [];
   for (let r = 0; r < cells.length; r++) {
-    if (cells[r].every(Boolean)) lines.push(r);
+    if (cells[r].every(isRealCell)) lines.push(r);
   }
   return lines;
 }
@@ -572,30 +575,29 @@ function drawMiniShape(container, shape, grade) {
 }
 
 // === ソルバー ===
-function runSolve() {
+function runSolve(opts = { precise: false }) {
+  const solveOpts = { precise: !!opts.precise, _anyTimedOut: false };
   const keys = selectedBoardKeys();
   if (keys.length === 0) {
     setStatus('使用する盤を選択してください');
     return;
   }
 
-  // インベントリを「ピースインスタンス」群へ展開。品質の高い順＋サイズの大きい順で並べる。
-  const pieces = [];
+  // DFS 中に同種ユニットを O(1) で消費/復元できるよう grade × shape の残数で持つ。
+  const invByGrade = {};
   for (const g of GRADES) {
+    invByGrade[g.key] = Object.fromEntries(SHAPES.map(s => [s, state.inventory[g.key][s] | 0]));
+  }
+
+  // 採用配置から具体的な pieceId を復元するための ID プール。
+  const pieceIdPool = {};
+  for (const g of GRADES) {
+    pieceIdPool[g.key] = {};
     for (const s of SHAPES) {
-      const n = state.inventory[g.key][s] | 0;
-      for (let i = 0; i < n; i++) {
-        pieces.push({ id: `${g.key}_${s}_${i}`, shape: s, grade: g.key });
-      }
+      const n = invByGrade[g.key][s];
+      pieceIdPool[g.key][s] = Array.from({ length: n }, (_, i) => `${g.key}_${s}_${i}`);
     }
   }
-  pieces.sort((a, b) => {
-    const pg = gradeMap[b.grade].priority - gradeMap[a.grade].priority;
-    if (pg !== 0) return pg;
-    const szA = SHAPE_ORIENTATIONS[a.shape][0].length;
-    const szB = SHAPE_ORIENTATIONS[b.shape][0].length;
-    return szB - szA;
-  });
 
   // 盤ごとに固定(locked)と既存配置の状態をコピー
   const boardStates = {};
@@ -618,11 +620,24 @@ function runSolve() {
   }
 
   const placements = []; // { boardKey, pieceId, grade, cells: [[r,c],...] }
-  const used = new Set();
 
-  // 盤の優先順: selectedBoardKeys() がメインを先頭にする
+  // 盤の優先順: selectedBoardKeys() がメインを先頭にする。
   for (const k of keys) {
-    fillBoardGreedy(boardStates[k], pieces, used, placements, k);
+    const boardOpts = {
+      deadline: solveOpts.precise ? null : performance.now() + 500,
+      timedOut: false
+    };
+    const result = solveBoard(boardStates[k], invByGrade, boardOpts);
+    boardStates[k].cells = result.cellsSnapshot ?? boardStates[k].cells;
+
+    // DFS 中の消費は探索復帰時に戻るため、採用配置だけここで実消費する。
+    for (const p of result.placements) {
+      invByGrade[p.grade][p.shape]--;
+      const pid = pieceIdPool[p.grade][p.shape].pop();
+      const cells = p.orient.map(([dr, dc]) => [p.baseR + dr, p.baseC + dc]);
+      placements.push({ boardKey: k, pieceId: pid, grade: p.grade, cells });
+    }
+    if (boardOpts.timedOut) solveOpts._anyTimedOut = true;
   }
 
   // 反映
@@ -634,78 +649,197 @@ function runSolve() {
     const bs = state.boards[p.boardKey];
     for (const [r, c] of p.cells) bs.pieceIds[r][c] = p.pieceId;
   }
-  const unused = pieces.filter(p => !used.has(p.id));
+
+  const unused = [];
+  for (const g of GRADES) {
+    for (const s of SHAPES) {
+      for (const id of pieceIdPool[g.key][s]) unused.push({ id, grade: g.key, shape: s });
+    }
+  }
   state.solveResult = { placements, unused };
 
   saveState();
   renderBoards();
   renderUnused();
 
-  let msg = `最適化完了: ${placements.length} 配置, 未使用 ${unused.length}`;
+  const msg = `最適化完了: ${placements.length} 配置, 未使用 ${unused.length}`;
   const lineSummary = keys.map(k => `${BOARDS[k].name}=${fullLinesOf(boardStates[k].cells).length}`).join(', ');
-  setStatus(`${msg} | ラインs ${lineSummary}`);
+  const timeoutMsg = solveOpts._anyTimedOut ? ' | ⚠ 基本モードで打ち切り。精密モードで再計算可能' : '';
+  setStatus(`${msg} | ラインs ${lineSummary}${timeoutMsg}`);
 }
 
-// 1盤を貪欲+ライトなローカル探索で埋める。
-// 方針: 残っている位置のうち最も「左上」のセルを起点に、そのセルを埋められるユニットを
-// 現状の評価値が最大になるように選ぶ。評価値はライン完成重視＋品質スコア。
-function fillBoardGreedy(boardState, pieces, used, placements, boardKey) {
+function solveBoard(boardState, invByGrade, opts) {
   const { meta } = boardState;
-  while (true) {
-    const empty = findTopLeftEmpty(boardState.cells, meta);
-    if (!empty) break;
+  const deadline = opts.deadline;
+  let best = { score: [-1, -1, -Infinity, -Infinity], cellsSnapshot: null, placements: [] };
+  const currentPlacements = [];
+  let curQualitySum = 0;
 
-    let best = null;
-    for (const piece of pieces) {
-      if (used.has(piece.id)) continue;
-      for (const orient of SHAPE_ORIENTATIONS[piece.shape]) {
-        for (const [dr, dc] of orient) {
-          const baseR = empty.r - dr;
-          const baseC = empty.c - dc;
-          if (!canPlaceOrient(boardState.cells, orient, baseR, baseC, meta)) continue;
-          const score = scorePlacement(boardState.cells, orient, baseR, baseC, meta, piece);
-          if (!best || score > best.score) {
-            best = { score, piece, orient, baseR, baseC };
+  function considerCurrent() {
+    const sc = scoreSnapshot(boardState.cells, curQualitySum);
+    if (compareScores(sc, best.score) > 0) {
+      best = {
+        score: sc,
+        cellsSnapshot: snapshotCells(boardState.cells),
+        placements: currentPlacements.map(p => ({ ...p }))
+      };
+    }
+  }
+
+  function dfs() {
+    considerCurrent();
+    if (deadline && performance.now() > deadline) {
+      opts.timedOut = true;
+      return;
+    }
+
+    const ub = upperBound(boardState, invByGrade, curQualitySum);
+    if (compareScores(ub, best.score) <= 0) return;
+
+    const empty = findNextEmpty(boardState.cells, meta, invByGrade);
+    if (!empty) return;
+
+    for (const g of GRADES_DESC_PRIORITY) {
+      for (const s of SHAPES) {
+        if (invByGrade[g.key][s] === 0) continue;
+        for (const orient of SHAPE_ORIENTATIONS[s]) {
+          for (let i = 0; i < orient.length; i++) {
+            const [dr, dc] = orient[i];
+            const baseR = empty.r - dr;
+            const baseC = empty.c - dc;
+            if (!isAnchorCell(orient, i, empty, baseR, baseC)) continue;
+            if (!canPlaceOrient(boardState.cells, orient, baseR, baseC, meta)) continue;
+
+            place(boardState.cells, orient, baseR, baseC, g.key);
+            invByGrade[g.key][s]--;
+            currentPlacements.push({ shape: s, grade: g.key, orient, baseR, baseC });
+            curQualitySum += g.priority;
+
+            dfs();
+
+            curQualitySum -= g.priority;
+            currentPlacements.pop();
+            invByGrade[g.key][s]++;
+            unplace(boardState.cells, orient, baseR, baseC);
+
+            if (opts.timedOut) return;
           }
         }
       }
     }
 
-    if (!best) {
-      // このセルは埋められない → そのセルをスキップ扱いにするため、番兵として次のループで同じ場所を見ないよう
-      // 「埋められない印」を一時的に入れる必要はない。以下でセルを探し直すだけ。
-      // 左上から探すので、このセルが残っている限り無限ループになる → 強制的に抜ける。
-      boardState.cells[empty.r][empty.c] = '__SKIP__';
-      continue;
-    }
-
-    // 配置
-    const cells = [];
-    for (const [dr, dc] of best.orient) {
-      const rr = best.baseR + dr;
-      const cc = best.baseC + dc;
-      boardState.cells[rr][cc] = best.piece.grade;
-      cells.push([rr, cc]);
-    }
-    used.add(best.piece.id);
-    placements.push({ boardKey, pieceId: best.piece.id, grade: best.piece.grade, cells });
+    boardState.cells[empty.r][empty.c] = '__SKIP__';
+    dfs();
+    boardState.cells[empty.r][empty.c] = null;
   }
 
-  // 番兵を戻す
+  dfs();
+
+  if (best.cellsSnapshot) removeSkipSentinels(best.cellsSnapshot, meta);
+  return best;
+}
+
+function snapshotCells(cells) {
+  return cells.map(r => r.slice());
+}
+
+function removeSkipSentinels(cells, meta) {
   for (let r = 0; r < meta.rows; r++) {
     for (let c = 0; c < meta.cols; c++) {
-      if (boardState.cells[r][c] === '__SKIP__') boardState.cells[r][c] = null;
+      if (cells[r][c] === '__SKIP__') cells[r][c] = null;
     }
   }
 }
 
-function findTopLeftEmpty(cells, meta) {
-  for (let r = 0; r < meta.rows; r++) {
-    for (let c = 0; c < meta.cols; c++) {
-      if (cells[r][c] === null) return { r, c };
+function scoreSnapshot(cells, placedQualitySum) {
+  return [
+    fullLinesOf(cells).length,
+    countRealCells(cells),
+    placedQualitySum,
+    gapShapeBonus(cells)
+  ];
+}
+
+function compareScores(a, b) {
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return a[i] - b[i];
+  }
+  return 0;
+}
+
+function upperBound(boardState, invByGrade, qualitySum) {
+  const { cells, meta } = boardState;
+  let emptyCount = 0;
+  let remainingPieces = 0;
+  let remainingQuality = 0;
+
+  for (const g of GRADES) {
+    for (const s of SHAPES) {
+      const n = invByGrade[g.key][s];
+      remainingPieces += n;
+      remainingQuality += n * g.priority;
     }
   }
-  return null;
+
+  let ubLines = 0;
+  for (let r = 0; r < meta.rows; r++) {
+    let real = 0;
+    let empty = 0;
+    for (let c = 0; c < meta.cols; c++) {
+      if (cells[r][c] === null) empty++;
+      else if (isRealCell(cells[r][c])) real++;
+    }
+    emptyCount += empty;
+    if (real + empty >= meta.cols) ubLines++;
+  }
+
+  const totalCells = meta.rows * meta.cols;
+  const ubFilled = countRealCells(cells) + Math.min(emptyCount, 4 * remainingPieces);
+  const ubGapBonus = ubFilled >= totalCells ? 0 : Math.floor((totalCells - ubFilled) / 4);
+  return [ubLines, ubFilled, qualitySum + remainingQuality, ubGapBonus];
+}
+
+function findNextEmpty(cells, meta, invByGrade = null) {
+  let fallback = null;
+  let best = null;
+  let bestCount = Infinity;
+
+  for (let r = 0; r < meta.rows; r++) {
+    for (let c = 0; c < meta.cols; c++) {
+      if (cells[r][c] !== null) continue;
+      const candidate = { r, c };
+      if (!fallback) fallback = candidate;
+      if (!invByGrade) return candidate;
+
+      const count = countCandidatesForCell(cells, meta, invByGrade, candidate);
+      if (count < bestCount) {
+        best = candidate;
+        bestCount = count;
+        if (count === 0) return best;
+      }
+    }
+  }
+
+  return best || fallback;
+}
+
+function countCandidatesForCell(cells, meta, invByGrade, empty) {
+  let count = 0;
+  for (const g of GRADES_DESC_PRIORITY) {
+    for (const s of SHAPES) {
+      if (invByGrade[g.key][s] === 0) continue;
+      for (const orient of SHAPE_ORIENTATIONS[s]) {
+        for (let i = 0; i < orient.length; i++) {
+          const [dr, dc] = orient[i];
+          const baseR = empty.r - dr;
+          const baseC = empty.c - dc;
+          if (!isAnchorCell(orient, i, empty, baseR, baseC)) continue;
+          if (canPlaceOrient(cells, orient, baseR, baseC, meta)) count++;
+        }
+      }
+    }
+  }
+  return count;
 }
 
 function canPlaceOrient(cells, orient, baseR, baseC, meta) {
@@ -717,32 +851,89 @@ function canPlaceOrient(cells, orient, baseR, baseC, meta) {
   return true;
 }
 
-function scorePlacement(cells, orient, baseR, baseC, meta, piece) {
-  // 仮置きして評価
-  const placed = [];
+function isAnchorCell(orient, idx, empty, baseR, baseC) {
+  const target = [empty.r - baseR, empty.c - baseC];
+  let min = null;
   for (const [dr, dc] of orient) {
-    const r = baseR + dr, c = baseC + dc;
-    cells[r][c] = piece.grade;
-    placed.push([r, c]);
+    if (baseR + dr !== empty.r || baseC + dc !== empty.c) continue;
+    if (!min || dr < min[0] || (dr === min[0] && dc < min[1])) min = [dr, dc];
   }
-  let completedLines = 0;
-  const affectedRows = new Set(placed.map(p => p[0]));
-  const isRealCell = v => v && v !== '__SKIP__';
-  for (const r of affectedRows) {
-    if (cells[r].every(isRealCell)) completedLines++;
-  }
-  // 行の埋まり率(密集)を加点
-  let denseScore = 0;
-  for (const r of affectedRows) {
-    const filled = cells[r].filter(isRealCell).length;
-    denseScore += filled;
-  }
-  // 戻す
-  for (const [r, c] of placed) cells[r][c] = null;
-
-  const gradeScore = gradeMap[piece.grade].priority;
-  return completedLines * 10000 + denseScore * 10 + gradeScore;
+  return !!min && orient[idx][0] === target[0] && orient[idx][1] === target[1] && target[0] === min[0] && target[1] === min[1];
 }
+
+function place(cells, orient, baseR, baseC, grade) {
+  for (const [dr, dc] of orient) cells[baseR + dr][baseC + dc] = grade;
+}
+
+function unplace(cells, orient, baseR, baseC) {
+  for (const [dr, dc] of orient) cells[baseR + dr][baseC + dc] = null;
+}
+
+function countRealCells(cells) {
+  let count = 0;
+  for (const row of cells) {
+    for (const cell of row) {
+      if (isRealCell(cell)) count++;
+    }
+  }
+  return count;
+}
+
+function isRealCell(value) {
+  return value !== null && value !== '__SKIP__';
+}
+
+function gapShapeBonus(cells) {
+  const rows = cells.length;
+  const cols = cells[0].length;
+  const visited = Array.from({ length: rows }, () => Array(cols).fill(false));
+  let bonus = 0;
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (cells[r][c] !== null || visited[r][c]) continue;
+      const region = floodFillGap(cells, visited, r, c);
+      bonus += region.length === 4 && matchesAnyTetromino(region) ? 1 : -1;
+    }
+  }
+
+  return bonus;
+}
+
+function floodFillGap(cells, visited, startR, startC) {
+  const rows = cells.length;
+  const cols = cells[0].length;
+  const region = [];
+  const stack = [[startR, startC]];
+
+  while (stack.length) {
+    const [r, c] = stack.pop();
+    if (r < 0 || r >= rows || c < 0 || c >= cols) continue;
+    if (visited[r][c] || cells[r][c] !== null) continue;
+    visited[r][c] = true;
+    region.push([r, c]);
+    stack.push([r - 1, c], [r + 1, c], [r, c - 1], [r, c + 1]);
+  }
+
+  return region;
+}
+
+function matchesAnyTetromino(region) {
+  return TETROMINO_NORMALIZED_KEYS.has(normalizeRegionKey(region));
+}
+
+function normalizeRegionKey(region) {
+  const minR = Math.min(...region.map(p => p[0]));
+  const minC = Math.min(...region.map(p => p[1]));
+  const norm = region
+    .map(([r, c]) => [r - minR, c - minC])
+    .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  return JSON.stringify(norm);
+}
+
+const TETROMINO_NORMALIZED_KEYS = new Set(
+  Object.values(SHAPE_ORIENTATIONS).flat().map(orient => normalizeRegionKey(orient))
+);
 
 // === 未使用ユニット表示 ===
 function renderUnused() {
