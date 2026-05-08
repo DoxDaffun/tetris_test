@@ -78,6 +78,38 @@ button.active { border-color: var(--accent); color: var(--accent); }
   align-items: center;
 }
 
+
+/* ========== Mode tabs ========== */
+.mode-panel {
+  padding: 8px 10px;
+}
+
+.mode-tabs {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.mode-tab {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mode-tab.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, #242a44);
+}
+
+.mode-rename {
+  padding: 4px 6px;
+  font-size: 0.78rem;
+  line-height: 1;
+}
+
 /* ========== Board selection ========== */
 .board-select {
   display: flex;
@@ -343,6 +375,7 @@ button.active { border-color: var(--accent); color: var(--accent); }
   :root { --cell: 26px; }
   .app { padding: 6px 5px 30px; }
   .board-opt { min-width: 90px; }
+  .mode-tab { max-width: 110px; font-size: 0.78rem; }
   .inv-row-head { min-width: 70px; font-size: 0.62rem; }
   .inv-cell { min-width: 36px; }
   .inv-cell input[type="number"] { width: 34px; font-size: 0.75rem; }
