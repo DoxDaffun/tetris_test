@@ -78,6 +78,37 @@ button.active { border-color: var(--accent); color: var(--accent); }
   align-items: center;
 }
 
+
+/* ========== Mode tabs ========== */
+.mode-panel { padding: 8px 10px; }
+
+.mode-tabs {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.mode-tab {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-width: 2px;
+}
+
+.mode-tab.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, #242a44);
+  color: var(--accent);
+}
+
+.mode-rename {
+  padding: 4px 6px;
+  font-size: 0.78rem;
+  line-height: 1;
+}
+
 /* ========== Board selection ========== */
 .board-select {
   display: flex;
@@ -346,5 +377,6 @@ button.active { border-color: var(--accent); color: var(--accent); }
   .inv-row-head { min-width: 70px; font-size: 0.62rem; }
   .inv-cell { min-width: 36px; }
   .inv-cell input[type="number"] { width: 34px; font-size: 0.75rem; }
+  .mode-tab { max-width: 110px; font-size: 0.78rem; }
   .primary { width: 100%; text-align: center; }
 }

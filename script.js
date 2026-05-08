@@ -63,6 +63,17 @@ const state = {
 };
 
 function initState() {
+  state.boardsUsed = { segway: true, skateboard: false, horse: false };
+  state.mainBoard = 'segway';
+  state.paintMode = 'paint';
+  state.manualPlacement = false;
+  state.paintGrade = 'better';
+  state.manualGrade = 'better';
+  state.manualShape = 'T';
+  state.boards = {};
+  state.inventory = {};
+  state.solveResult = null;
+
   for (const key of BOARD_ORDER) {
     const { rows, cols } = BOARDS[key];
     state.boards[key] = {
@@ -78,92 +89,192 @@ function initState() {
 }
 
 // === 永続化 (localStorage) ===
-const STORAGE_KEY = 'unit-optimizer:v1';
+const LEGACY_STORAGE_KEY = 'unit-optimizer:v1';
+const MODES_STORAGE_KEY = 'unit-optimizer:v2';
+const DEFAULT_MODE_NAMES = ['Mode A', 'Mode B', 'Mode C'];
+const MODE_COUNT = 3;
+const MODE_NAME_MAX_LENGTH = 15;
 
-function saveState() {
+let modeStore = createDefaultModeStore();
+
+function createDefaultModeStore() {
+  return {
+    activeMode: 0,
+    modes: DEFAULT_MODE_NAMES.map(name => ({ name, snapshot: {} }))
+  };
+}
+
+function clonePlainValue(value, fallback = {}) {
   try {
-    const snapshot = {
-      boardsUsed: state.boardsUsed,
-      mainBoard: state.mainBoard,
-      paintGrade: state.paintGrade,
-      manualGrade: state.manualGrade,
-      manualShape: state.manualShape,
-      boards: state.boards,
-      inventory: state.inventory,
-      solveResult: state.solveResult
+    return JSON.parse(JSON.stringify(value ?? fallback));
+  } catch (e) {
+    return fallback;
+  }
+}
+
+function serializeStateSnapshot() {
+  return clonePlainValue({
+    boardsUsed: state.boardsUsed,
+    mainBoard: state.mainBoard,
+    paintGrade: state.paintGrade,
+    manualGrade: state.manualGrade,
+    manualShape: state.manualShape,
+    boards: state.boards,
+    inventory: state.inventory,
+    solveResult: state.solveResult
+  });
+}
+
+function applySnapshotToState(snap) {
+  if (!snap || typeof snap !== 'object') return;
+
+  if (snap.boardsUsed && typeof snap.boardsUsed === 'object') {
+    for (const k of BOARD_ORDER) {
+      if (typeof snap.boardsUsed[k] === 'boolean') state.boardsUsed[k] = snap.boardsUsed[k];
+    }
+  }
+  if (BOARD_ORDER.includes(snap.mainBoard)) state.mainBoard = snap.mainBoard;
+  if (gradeMap[snap.paintGrade])  state.paintGrade  = snap.paintGrade;
+  if (gradeMap[snap.manualGrade]) state.manualGrade = snap.manualGrade;
+  if (SHAPES.includes(snap.manualShape)) state.manualShape = snap.manualShape;
+
+  // 盤面: サイズが一致する時のみ採用 (仕様変更時の破損回避)
+  if (snap.boards && typeof snap.boards === 'object') {
+    for (const k of BOARD_ORDER) {
+      const meta = BOARDS[k];
+      const saved = snap.boards[k];
+      if (!saved || !Array.isArray(saved.cells) || !Array.isArray(saved.locked)) continue;
+      if (saved.cells.length !== meta.rows) continue;
+      if (!saved.cells.every(row => Array.isArray(row) && row.length === meta.cols)) continue;
+      state.boards[k].cells  = saved.cells.map(r => r.map(v => (gradeMap[v] ? v : null)));
+      state.boards[k].locked = saved.locked.map(r => r.map(v => !!v));
+      if (
+        Array.isArray(saved.pieceIds) &&
+        saved.pieceIds.length === meta.rows &&
+        saved.pieceIds.every(row => Array.isArray(row) && row.length === meta.cols)
+      ) {
+        state.boards[k].pieceIds = saved.pieceIds.map(r => r.map(v => (typeof v === 'string' ? v : null)));
+      } else {
+        state.boards[k].pieceIds = Array.from({ length: meta.rows }, () => Array(meta.cols).fill(null));
+      }
+    }
+  }
+
+  // 在庫
+  if (snap.inventory && typeof snap.inventory === 'object') {
+    for (const g of GRADES) {
+      const row = snap.inventory[g.key];
+      if (!row) continue;
+      for (const s of SHAPES) {
+        const n = Number(row[s]);
+        if (Number.isFinite(n) && n >= 0) state.inventory[g.key][s] = Math.floor(n);
+      }
+    }
+  }
+
+  // 未使用表示の復元
+  if (snap.solveResult && Array.isArray(snap.solveResult.unused)) {
+    state.solveResult = {
+      placements: Array.isArray(snap.solveResult.placements) ? snap.solveResult.placements : [],
+      unused: snap.solveResult.unused.filter(u => u && gradeMap[u.grade] && SHAPES.includes(u.shape))
     };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
+  }
+}
+
+function sanitizeModeName(name, idx) {
+  const fallback = DEFAULT_MODE_NAMES[idx] || `Mode ${idx + 1}`;
+  if (typeof name !== 'string') return fallback;
+  const trimmed = name.trim();
+  return trimmed ? trimmed.slice(0, MODE_NAME_MAX_LENGTH) : fallback;
+}
+
+function normalizeModeStore(store) {
+  const normalized = createDefaultModeStore();
+  if (!store || typeof store !== 'object') return normalized;
+
+  const active = Number(store.activeMode);
+  normalized.activeMode = Number.isInteger(active) && active >= 0 && active < MODE_COUNT ? active : 0;
+
+  const rawModes = Array.isArray(store.modes) ? store.modes : [];
+  for (let i = 0; i < MODE_COUNT; i++) {
+    const mode = rawModes[i];
+    if (!mode || typeof mode !== 'object') continue;
+    normalized.modes[i] = {
+      name: sanitizeModeName(mode.name, i),
+      snapshot: mode.snapshot && typeof mode.snapshot === 'object' ? clonePlainValue(mode.snapshot) : {}
+    };
+  }
+  return normalized;
+}
+
+function persistModeStore() {
+  try {
+    localStorage.setItem(MODES_STORAGE_KEY, JSON.stringify(modeStore));
   } catch (e) {
     // ストレージ不可 (プライベートモード等) はサイレントに無視
   }
 }
 
+function saveState() {
+  if (!modeStore.modes[modeStore.activeMode]) modeStore = normalizeModeStore(modeStore);
+  modeStore.modes[modeStore.activeMode].snapshot = serializeStateSnapshot();
+  persistModeStore();
+}
+
 function loadState() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return;
-    const snap = JSON.parse(raw);
-    if (!snap || typeof snap !== 'object') return;
-
-    if (snap.boardsUsed && typeof snap.boardsUsed === 'object') {
-      for (const k of BOARD_ORDER) {
-        if (typeof snap.boardsUsed[k] === 'boolean') state.boardsUsed[k] = snap.boardsUsed[k];
-      }
-    }
-    if (BOARD_ORDER.includes(snap.mainBoard)) state.mainBoard = snap.mainBoard;
-    if (gradeMap[snap.paintGrade])  state.paintGrade  = snap.paintGrade;
-    if (gradeMap[snap.manualGrade]) state.manualGrade = snap.manualGrade;
-    if (SHAPES.includes(snap.manualShape)) state.manualShape = snap.manualShape;
-
-    // 盤面: サイズが一致する時のみ採用 (仕様変更時の破損回避)
-    if (snap.boards && typeof snap.boards === 'object') {
-      for (const k of BOARD_ORDER) {
-        const meta = BOARDS[k];
-        const saved = snap.boards[k];
-        if (!saved || !Array.isArray(saved.cells) || !Array.isArray(saved.locked)) continue;
-        if (saved.cells.length !== meta.rows) continue;
-        if (!saved.cells.every(row => Array.isArray(row) && row.length === meta.cols)) continue;
-        state.boards[k].cells  = saved.cells.map(r => r.map(v => (gradeMap[v] ? v : null)));
-        state.boards[k].locked = saved.locked.map(r => r.map(v => !!v));
-        if (
-          Array.isArray(saved.pieceIds) &&
-          saved.pieceIds.length === meta.rows &&
-          saved.pieceIds.every(row => Array.isArray(row) && row.length === meta.cols)
-        ) {
-          state.boards[k].pieceIds = saved.pieceIds.map(r => r.map(v => (typeof v === 'string' ? v : null)));
-        } else {
-          state.boards[k].pieceIds = Array.from({ length: meta.rows }, () => Array(meta.cols).fill(null));
+    const rawV2 = localStorage.getItem(MODES_STORAGE_KEY);
+    if (rawV2) {
+      modeStore = normalizeModeStore(JSON.parse(rawV2));
+      persistModeStore();
+    } else {
+      modeStore = createDefaultModeStore();
+      const rawV1 = localStorage.getItem(LEGACY_STORAGE_KEY);
+      if (rawV1) {
+        const legacySnap = JSON.parse(rawV1);
+        if (legacySnap && typeof legacySnap === 'object') {
+          modeStore.modes[0].snapshot = clonePlainValue(legacySnap);
         }
       }
-    }
-
-    // 在庫
-    if (snap.inventory && typeof snap.inventory === 'object') {
-      for (const g of GRADES) {
-        const row = snap.inventory[g.key];
-        if (!row) continue;
-        for (const s of SHAPES) {
-          const n = Number(row[s]);
-          if (Number.isFinite(n) && n >= 0) state.inventory[g.key][s] = Math.floor(n);
-        }
-      }
-    }
-
-    // 未使用表示の復元
-    if (snap.solveResult && Array.isArray(snap.solveResult.unused)) {
-      state.solveResult = {
-        placements: Array.isArray(snap.solveResult.placements) ? snap.solveResult.placements : [],
-        unused: snap.solveResult.unused.filter(u => u && gradeMap[u.grade] && SHAPES.includes(u.shape))
-      };
+      persistModeStore();
     }
   } catch (e) {
     // パース失敗時はデフォルトのまま続行
+    modeStore = createDefaultModeStore();
   }
+
+  applySnapshotToState(modeStore.modes[modeStore.activeMode].snapshot);
+}
+
+function switchMode(idx) {
+  if (!Number.isInteger(idx) || idx < 0 || idx >= MODE_COUNT || idx === modeStore.activeMode) return;
+
+  saveState();
+  modeStore.activeMode = idx;
+  persistModeStore();
+
+  initState();
+  applySnapshotToState(modeStore.modes[idx].snapshot);
+  state.manualPlacement = false;
+  hideManualPicker();
+  renderActiveMode();
+  setStatus(`${modeStore.modes[idx].name} に切り替えました`);
+}
+
+function renameMode(idx) {
+  if (!Number.isInteger(idx) || idx < 0 || idx >= MODE_COUNT) return;
+  const current = modeStore.modes[idx].name;
+  const input = prompt('モード名を入力', current);
+  if (input === null) return;
+  modeStore.modes[idx].name = sanitizeModeName(input, idx);
+  persistModeStore();
+  renderModeTabs();
 }
 
 // === DOM参照 ===
 const el = {};
 function cacheEls() {
+  el.modeTabs = document.getElementById('modeTabs');
   el.boardSelect = document.getElementById('boardSelect');
   el.boards = document.getElementById('boards');
   el.paintGrade = document.getElementById('paintGrade');
@@ -203,13 +314,52 @@ function init() {
   el.resetBoard.addEventListener('click', resetBoards);
   el.solveBtn.addEventListener('click', runSolve);
 
+  renderActiveMode();
+}
+
+// === 盤選択 UI ===
+function renderActiveMode() {
+  renderModeTabs();
   renderBoardSelect();
   renderBoards();
   renderInventory();
   renderUnused();
+  el.paintGrade.value = state.paintGrade;
+  el.paintToggle.classList.toggle('active', state.paintMode === 'paint');
+  el.eraseToggle.classList.toggle('active', state.paintMode === 'erase');
+  el.manualToggle.classList.toggle('active', state.manualPlacement);
+  if (!state.manualPlacement) hideManualPicker();
 }
 
-// === 盤選択 UI ===
+function renderModeTabs() {
+  el.modeTabs.innerHTML = '';
+  modeStore.modes.forEach((mode, idx) => {
+    const tab = document.createElement('button');
+    tab.type = 'button';
+    tab.className = 'mode-tab';
+    tab.dataset.idx = String(idx);
+    tab.textContent = mode.name;
+    tab.title = mode.name;
+    if (idx === modeStore.activeMode) {
+      tab.classList.add('active');
+      tab.setAttribute('aria-current', 'page');
+    }
+    tab.addEventListener('click', () => switchMode(idx));
+    el.modeTabs.append(tab);
+
+    if (idx === modeStore.activeMode) {
+      const rename = document.createElement('button');
+      rename.type = 'button';
+      rename.className = 'mode-rename';
+      rename.setAttribute('aria-label', 'rename');
+      rename.title = 'モード名を変更';
+      rename.textContent = '✎';
+      rename.addEventListener('click', () => renameMode(idx));
+      el.modeTabs.append(rename);
+    }
+  });
+}
+
 function renderBoardSelect() {
   el.boardSelect.innerHTML = '';
   for (const key of BOARD_ORDER) {
