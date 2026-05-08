@@ -21,6 +21,19 @@ const GRADES = [
 const gradeMap = Object.fromEntries(GRADES.map(g => [g.key, g]));
 const GRADES_DESC_PRIORITY = GRADES.slice().sort((a, b) => b.priority - a.priority);
 
+// === 効果メモ ===
+const EFFECTS = [
+  { key: 'Cr', labelJa: 'クリティカルダメージ', labelEn: 'Critical damage' },
+  { key: 'Sk', labelJa: 'スキルダメージ', labelEn: 'Skill damage' },
+  { key: 'Sh', labelJa: 'シールドダメージ', labelEn: 'Shield damage' },
+  { key: 'P',  labelJa: '毒', labelEn: 'Poisoned' },
+  { key: 'W',  labelJa: '衰弱', labelEn: 'Weakened' },
+  { key: 'Ch', labelJa: '氷結', labelEn: 'Chilled' },
+  { key: 'L',  labelJa: '裂傷', labelEn: 'Lacerated' },
+  { key: 'B',  labelJa: 'ボスダメージ', labelEn: 'Boss damage' }
+];
+const EFFECT_KEYS = new Set(EFFECTS.map(e => e.key));
+
 // === 形状 ===
 const SHAPES = ['O', 'I', 'T', 'L', 'J'];
 const SHAPE_ORIENTATIONS = {
@@ -55,10 +68,11 @@ const state = {
   mainBoard: 'segway',
   paintMode: 'paint',            // 'paint' | 'erase'
   manualPlacement: false,
+  memoMode: false,
   paintGrade: 'better',
   manualGrade: 'better',
   manualShape: 'T',
-  boards: {},                    // boardKey -> { cells: [[grade|null]], locked: [[bool]], pieceIds: [[string|null]] }
+  boards: {},                    // boardKey -> { cells, locked, pieceIds, pieceNotes }
   inventory: {},                 // gradeKey -> shapeKey -> count
   solveResult: null              // { placements, unused }
 };
@@ -68,6 +82,7 @@ function initState() {
   state.mainBoard = 'segway';
   state.paintMode = 'paint';
   state.manualPlacement = false;
+  state.memoMode = false;
   state.paintGrade = 'better';
   state.manualGrade = 'better';
   state.manualShape = 'T';
@@ -80,7 +95,8 @@ function initState() {
     state.boards[key] = {
       cells: Array.from({ length: rows }, () => Array(cols).fill(null)),
       locked: Array.from({ length: rows }, () => Array(cols).fill(false)),
-      pieceIds: Array.from({ length: rows }, () => Array(cols).fill(null))
+      pieceIds: Array.from({ length: rows }, () => Array(cols).fill(null)),
+      pieceNotes: {}
     };
   }
   for (const g of GRADES) {
@@ -151,6 +167,8 @@ function applySnapshotToState(snap) {
       } else {
         state.boards[k].pieceIds = Array.from({ length: meta.rows }, () => Array(meta.cols).fill(null));
       }
+      state.boards[k].pieceNotes = sanitizePieceNotes(saved.pieceNotes);
+      pruneOrphanNotes(state.boards[k]);
     }
   }
 
@@ -173,6 +191,15 @@ function applySnapshotToState(snap) {
       unused: snap.solveResult.unused.filter(u => u && gradeMap[u.grade] && SHAPES.includes(u.shape))
     };
   }
+}
+
+function sanitizePieceNotes(pieceNotes) {
+  const clean = {};
+  if (!pieceNotes || typeof pieceNotes !== 'object' || Array.isArray(pieceNotes)) return clean;
+  for (const [pieceId, effectKey] of Object.entries(pieceNotes)) {
+    if (typeof pieceId === 'string' && EFFECT_KEYS.has(effectKey)) clean[pieceId] = effectKey;
+  }
+  return clean;
 }
 
 function normalizeModeStore(rawStore) {
@@ -246,6 +273,7 @@ function cacheEls() {
   el.paintToggle = document.getElementById('paintToggle');
   el.eraseToggle = document.getElementById('eraseToggle');
   el.manualToggle = document.getElementById('manualToggle');
+  el.memoToggle = document.getElementById('memoToggle');
   el.resetBoard = document.getElementById('resetBoard');
   el.solveBtn = document.getElementById('solveBtn');
   el.status = document.getElementById('status');
@@ -276,6 +304,7 @@ function init() {
   el.paintToggle.addEventListener('click', () => setPaintMode('paint'));
   el.eraseToggle.addEventListener('click', () => setPaintMode('erase'));
   el.manualToggle.addEventListener('click', () => toggleManual());
+  el.memoToggle.addEventListener('click', () => toggleMemo());
   el.resetBoard.addEventListener('click', resetBoards);
   el.solveBtn.addEventListener('click', runSolve);
 
@@ -324,6 +353,7 @@ function switchMode(idx) {
   persistModeStore();
 
   hideManualPicker();
+  hideMemoPicker();
   initState();
   applySnapshotToState(modeStore.modes[idx].snapshot);
   syncControlsToState();
@@ -348,9 +378,10 @@ function renameMode(idx) {
 
 function syncControlsToState() {
   el.paintGrade.value = state.paintGrade;
-  el.paintToggle.classList.toggle('active', state.paintMode === 'paint');
-  el.eraseToggle.classList.toggle('active', state.paintMode === 'erase');
+  el.paintToggle.classList.toggle('active', state.paintMode === 'paint' && !state.memoMode);
+  el.eraseToggle.classList.toggle('active', state.paintMode === 'erase' && !state.memoMode);
   el.manualToggle.classList.toggle('active', state.manualPlacement);
+  el.memoToggle.classList.toggle('active', state.memoMode);
 }
 
 // === 盤選択 UI ===
@@ -453,6 +484,7 @@ function renderOneBoard(key) {
   grid.style.gridTemplateRows = `repeat(${meta.rows}, var(--cell))`;
 
   const lines = fullLinesOf(bs.cells);
+  const anchors = computePieceAnchors(bs.pieceIds, meta);
 
   for (let r = 0; r < meta.rows; r++) {
     for (let c = 0; c < meta.cols; c++) {
@@ -475,8 +507,17 @@ function renderOneBoard(key) {
         if (neighborDiffers(r, c + 1)) edges.push('inset -2px 0 0 0 #0008', 'inset -3px 0 0 0 #fff9');
         if (edges.length) div.style.boxShadow = edges.join(', ');
       }
+      if (myPieceId && anchors[myPieceId]?.r === r && anchors[myPieceId]?.c === c) {
+        const noteKey = bs.pieceNotes?.[myPieceId];
+        if (EFFECT_KEYS.has(noteKey)) {
+          const note = document.createElement('span');
+          note.className = 'cell-note';
+          note.textContent = noteKey;
+          div.append(note);
+        }
+      }
       if (bs.locked[r][c]) div.classList.add('prefilled');
-      div.addEventListener('click', () => onCellClick(key, r, c));
+      div.addEventListener('click', () => onCellClick(key, r, c, div));
       grid.append(div);
     }
   }
@@ -490,6 +531,17 @@ function renderOneBoard(key) {
   el.boards.append(wrap);
 }
 
+function computePieceAnchors(pieceIds, meta) {
+  const anchors = {};
+  for (let r = 0; r < meta.rows; r++) {
+    for (let c = 0; c < meta.cols; c++) {
+      const pieceId = pieceIds[r][c];
+      if (pieceId && !anchors[pieceId]) anchors[pieceId] = { r, c };
+    }
+  }
+  return anchors;
+}
+
 function fullLinesOf(cells) {
   const lines = [];
   for (let r = 0; r < cells.length; r++) {
@@ -499,12 +551,18 @@ function fullLinesOf(cells) {
 }
 
 // === クリック ===
-function onCellClick(boardKey, r, c) {
+function onCellClick(boardKey, r, c, cellEl) {
+  if (state.memoMode) {
+    tryEditPieceMemo(boardKey, r, c, cellEl);
+    return;
+  }
   if (state.manualPlacement) {
     tryManualPlace(boardKey, r, c);
     return;
   }
   const bs = state.boards[boardKey];
+  const oldPieceId = bs.pieceIds[r][c];
+  if (oldPieceId && bs.pieceNotes) delete bs.pieceNotes[oldPieceId];
   if (state.paintMode === 'erase') {
     bs.cells[r][c] = null;
     bs.locked[r][c] = false;
@@ -514,6 +572,7 @@ function onCellClick(boardKey, r, c) {
     bs.locked[r][c] = true;
     bs.pieceIds[r][c] = null;
   }
+  pruneOrphanNotes(bs);
   state.solveResult = null;
   saveState();
   renderBoards();
@@ -522,6 +581,7 @@ function onCellClick(boardKey, r, c) {
 
 // === モード切り替え ===
 function setPaintMode(mode) {
+  if (state.memoMode) toggleMemo(false);
   state.paintMode = mode;
   el.paintToggle.classList.toggle('active', mode === 'paint');
   el.eraseToggle.classList.toggle('active', mode === 'erase');
@@ -529,15 +589,38 @@ function setPaintMode(mode) {
   saveState();
 }
 
-function toggleManual() {
-  state.manualPlacement = !state.manualPlacement;
+function toggleManual(force) {
+  if (state.memoMode) toggleMemo(false);
+  state.manualPlacement = typeof force === 'boolean' ? force : !state.manualPlacement;
   el.manualToggle.classList.toggle('active', state.manualPlacement);
   if (state.manualPlacement) {
+    el.paintToggle.classList.remove('active');
+    el.eraseToggle.classList.remove('active');
     showManualPicker();
     setStatus('手動配置モード: 形状と品質を選択してから盤面をクリック');
   } else {
+    syncControlsToState();
     hideManualPicker();
     setStatus('手動配置モード OFF');
+  }
+}
+
+function toggleMemo(force) {
+  state.memoMode = typeof force === 'boolean' ? force : !state.memoMode;
+  el.memoToggle.classList.toggle('active', state.memoMode);
+  if (state.memoMode) {
+    if (state.manualPlacement) {
+      state.manualPlacement = false;
+      el.manualToggle.classList.remove('active');
+    }
+    el.paintToggle.classList.remove('active');
+    el.eraseToggle.classList.remove('active');
+    hideManualPicker();
+    setStatus('メモモード: 配置済みピースをクリックして効果メモを設定');
+  } else {
+    hideMemoPicker();
+    syncControlsToState();
+    setStatus('メモモード OFF');
   }
 }
 
@@ -581,6 +664,74 @@ function hideManualPicker() {
   if (manualPicker) { manualPicker.remove(); manualPicker = null; }
 }
 
+// === 効果メモのピッカー ===
+let memoPicker = null;
+function tryEditPieceMemo(boardKey, r, c, cellEl) {
+  const bs = state.boards[boardKey];
+  const pieceId = bs.pieceIds[r][c];
+  if (!pieceId) {
+    hideMemoPicker();
+    setStatus('メモ対象のピースがありません');
+    return;
+  }
+  showMemoPicker(boardKey, pieceId, cellEl);
+}
+
+function showMemoPicker(boardKey, pieceId, cellEl) {
+  hideMemoPicker();
+  const bs = state.boards[boardKey];
+  memoPicker = document.createElement('div');
+  memoPicker.className = 'memo-picker';
+
+  const select = document.createElement('select');
+  const emptyOpt = document.createElement('option');
+  emptyOpt.value = '';
+  emptyOpt.textContent = '– / なし';
+  select.append(emptyOpt);
+  for (const effect of EFFECTS) {
+    const opt = document.createElement('option');
+    opt.value = effect.key;
+    opt.textContent = `${effect.labelJa} / ${effect.labelEn}`;
+    select.append(opt);
+  }
+  select.value = bs.pieceNotes?.[pieceId] || '';
+  select.addEventListener('click', ev => ev.stopPropagation());
+  select.addEventListener('change', () => {
+    if (!bs.pieceNotes) bs.pieceNotes = {};
+    if (EFFECT_KEYS.has(select.value)) bs.pieceNotes[pieceId] = select.value;
+    else delete bs.pieceNotes[pieceId];
+    saveState();
+    renderBoards();
+    hideMemoPicker();
+    setStatus(select.value ? '効果メモを設定しました' : '効果メモを削除しました');
+  });
+  memoPicker.append(select);
+  memoPicker.addEventListener('click', ev => ev.stopPropagation());
+
+  const rect = cellEl.getBoundingClientRect();
+  const left = Math.max(window.scrollX + 6, Math.min(rect.left + window.scrollX, window.scrollX + window.innerWidth - 266));
+  memoPicker.style.left = `${left}px`;
+  memoPicker.style.top = `${rect.bottom + window.scrollY + 4}px`;
+  document.body.append(memoPicker);
+  select.focus();
+
+  setTimeout(() => {
+    document.addEventListener('click', onMemoOutsideClick, { capture: true });
+  }, 0);
+}
+
+function onMemoOutsideClick(ev) {
+  if (memoPicker && !memoPicker.contains(ev.target)) hideMemoPicker();
+}
+
+function hideMemoPicker() {
+  if (memoPicker) {
+    memoPicker.remove();
+    memoPicker = null;
+  }
+  document.removeEventListener('click', onMemoOutsideClick, { capture: true });
+}
+
 function tryManualPlace(boardKey, r, c) {
   const bs = state.boards[boardKey];
   const meta = BOARDS[boardKey];
@@ -622,7 +773,8 @@ function resetBoards() {
     state.boards[key] = {
       cells: Array.from({ length: rows }, () => Array(cols).fill(null)),
       locked: Array.from({ length: rows }, () => Array(cols).fill(false)),
-      pieceIds: Array.from({ length: rows }, () => Array(cols).fill(null))
+      pieceIds: Array.from({ length: rows }, () => Array(cols).fill(null)),
+      pieceNotes: {}
     };
   }
   state.solveResult = null;
@@ -753,12 +905,14 @@ function runSolve() {
 
   // 既存の非ロックセルはソルバー用にクリア(前回の配置を消す)
   for (const k of keys) {
+    keepNotesForLockedPieces(state.boards[k]);
     for (let r = 0; r < boardStates[k].meta.rows; r++) {
       for (let c = 0; c < boardStates[k].meta.cols; c++) {
         if (!boardStates[k].locked[r][c]) boardStates[k].cells[r][c] = null;
         if (!state.boards[k].locked[r][c]) state.boards[k].pieceIds[r][c] = null;
       }
     }
+    pruneOrphanNotes(state.boards[k]);
   }
 
   const placements = []; // { boardKey, pieceId, grade, cells: [[r,c],...] }
@@ -808,6 +962,33 @@ function runSolve() {
   const lineSummary = keys.map(k => `${BOARDS[k].name}=${fullLinesOf(boardStates[k].cells).length}`).join(', ');
   const timeoutMsg = solveOpts._anyTimedOut ? ' | ⚠ 時間内の最良解を表示しています' : '';
   setStatus(`${msg} | ラインs ${lineSummary}${timeoutMsg}`);
+}
+
+function collectPieceIds(bs, onlyLocked = false) {
+  const ids = new Set();
+  for (let r = 0; r < bs.pieceIds.length; r++) {
+    for (let c = 0; c < bs.pieceIds[r].length; c++) {
+      if ((!onlyLocked || bs.locked[r][c]) && bs.pieceIds[r][c]) ids.add(bs.pieceIds[r][c]);
+    }
+  }
+  return ids;
+}
+
+function keepNotesForLockedPieces(bs) {
+  const lockedIds = collectPieceIds(bs, true);
+  filterPieceNotes(bs, lockedIds);
+}
+
+function pruneOrphanNotes(bs) {
+  filterPieceNotes(bs, collectPieceIds(bs));
+}
+
+function filterPieceNotes(bs, validIds) {
+  const notes = sanitizePieceNotes(bs.pieceNotes);
+  for (const pieceId of Object.keys(notes)) {
+    if (!validIds.has(pieceId)) delete notes[pieceId];
+  }
+  bs.pieceNotes = notes;
 }
 
 function solveBoard(boardState, invByGrade, opts) {
